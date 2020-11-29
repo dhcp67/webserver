@@ -11,21 +11,20 @@
 v = debug
 CC = gcc
 #wildcard 文件匹配
-SrcFiles = $(wildcard *.c)
+SrcFiles = $(wildcard *.c) $(wildcard threadpool/*.c) $(wildcard cjson/*.c)
+ObjectFiles = $(patsubst %.c,%.o,$(SrcFiles))
 
 ifeq ($(v), debug)
 ALL: debug
 # 内容替换
-ObjectFiles = $(patsubst %.c,d%.o,$(SrcFiles))
-CxxArgs = -g -DD -Wall -c -I./include
+CxxArgs = -g -DD -Wall -c -I./include 
 else
 ALL: webserver
-ObjectFiles = $(patsubst %.c,%.o,$(SrcFiles))
 CxxArgs = -c -O3 -I./include
 endif
 
 #$^ 全部依赖文件
-server : $(ObjectFiles)
+webserver : $(ObjectFiles)
 	${CC} -o $@ $^ -lpthread 
 	@echo -e "\033[32m make relese version OK\033[0m"
 
@@ -37,15 +36,15 @@ debug : $(ObjectFiles)
 %.o : %.c
 	${CC} ${CxxArgs} $< -o $@ 
 
-d%.o : %.c
-	${CC} ${CxxArgs} $< -o $@ 
-
-#.PHONY: clear
-clear: 
-	-@rm -f *.o debug a.out server
+#.PHONY: clean
+clean: 
+	-@rm -f *.o debug webserver */*.o
 	@echo "clear OK"
 
 #.PHONY:run
-run :
-	./debug
+run : webserver
+	./webserver
 
+#.PHONY:kill
+kill:
+	pkill webserver

@@ -1,0 +1,5 @@
+{
+    "port" : 8848,
+    "work_dir" : "/home/admin",
+    "html_404" : "/home/admin/webserver/404.html"
+}
