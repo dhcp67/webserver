@@ -446,7 +446,9 @@ void do_accept(int lfd, int epfd) {
     // 边沿非阻塞模式
 
     ev.events = EPOLLIN | EPOLLET;
+    pthread_mutex_lock(&mute);
     int ret = epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
+    pthread_mutex_unlock(&mute);
     if(ret == -1) {
         _perror("epoll_ctl add cfd error");
         exit(1);
