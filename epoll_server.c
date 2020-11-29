@@ -1,13 +1,4 @@
-/*************************************************************************
-*    File Name: epoll_server.c
-*    Author: LiChun
-*    Mail: trainlee@gmail.com
-*    Created Time: 2020年11月21日 星期六 21时08分38秒
-*************************************************************************/
-
-#include <pthread.h>
 #include <stdio.h>
-#include <sys/socket.h>
 #include <unistd.h>
 #include <stdlib.h>
 #include <sys/types.h>
@@ -19,37 +10,30 @@
 #include <sys/stat.h>
 #include <ctype.h>
 #include <errno.h>
-#include <sys/sendfile.h>
-#include <sys/mman.h>
 #include "epoll_server.h"
-#include "threadpool.h"
-#include "common.h"
 
 #define MAXSIZE 2000
 #define _MAXLENGTH 4096
 #define _LENGTH 1024
 
-pthread_mutex_t mute;
+void epoll_run(int port) {
+    // 创建一个epoll树的根节点
+    int epfd = epoll_create(MAXSIZE);
+    if(epfd == -1) {
+        perror("epoll_create error");
+        exit(1);
+    }
 
-typedef struct epoll_transmit_data{
-    int fd;
-    int epfd;
-}epoll_event_t;
-
-void *reactor(void *arg) {
-    //signal(SIGABRT, SIG_IGN);
-    int epfd = *((int*)arg);
+    // 添加要监听的节点
+    // 先添加监听lfd
+    int lfd = init_listen_fd(port, epfd);
 
     // 委托内核检测添加到树上的节点
     struct epoll_event all[MAXSIZE];
-
-    tk_threadpool_t *pool = threadpool_init(100);
-    // 初始化锁
-    pthread_mutex_init(&mute, NULL);
     while(1) {
         int ret = epoll_wait(epfd, all, MAXSIZE, -1);
         if(ret == -1) {
-            _perror("epoll_wait error");
+            perror("epoll_wait error");
             exit(1);
         }
 
@@ -62,100 +46,45 @@ void *reactor(void *arg) {
                 continue;
             }
 
-            // 进入线程读写数据
-            // 申请空间，在do_read中释放
-            epoll_event_t *p = (void *)malloc(sizeof(epoll_event_t));
-            p->fd = pev->data.fd;
-            p->epfd = epfd;
-            threadpool_add(pool, do_read, (void *)p);
-            //do_read(pev);
-        }
-    }
-    // 销毁互斥锁
-    pthread_mutex_destroy(&mute);
-    threadpool_destroy(pool, graceful_shutdown);
-    return NULL;
-}
-
-void epoll_run(int port) {
-    // 创建一个从epoll树的根节点
-    int sub_fd = epoll_create(MAXSIZE);
-    if(sub_fd == -1) {
-        _perror("epoll_create error");
-        exit(1);
-    }
-
-    // 创建主epoll树根节点
-    int master_fd = epoll_create(1); 
-    // 创建要监听的套接字
-    int lfd = init_listen_fd(port, master_fd);
-
-    // 创建处理线程
-    pthread_t pth_t;
-    pthread_create(&pth_t, NULL, reactor, (void *)&sub_fd);
-    pthread_detach(pth_t);
-
-    // 委托内核检测添加到树上的节点
-    struct epoll_event all[MAXSIZE];
-    while(1) {
-        int ret = epoll_wait(master_fd, all, MAXSIZE, -1);
-        if(ret == -1) {
-            _perror("epoll_wait error");
-            exit(1);
-        }
-
-        // 遍历发生变化的节点
-        for(int i = 0; i < ret; ++i) {
-            // 只处理读事件, 其他事件默认不处理
-            struct epoll_event *pev = &all[i];
-            // 如果是读事件
-            if(pev->events & EPOLLIN) {
-                // 处理新连接并加到epoll树
-                do_accept(lfd, sub_fd);
+            if(pev->data.fd == lfd) {
+                // 接受连接请求
+                do_accept(lfd, epfd);
+            }
+            else {
+                // 读数据
+                do_read(pev->data.fd, epfd);
             }
         }
     }
 }
 
 // 读数据
-void do_read(void *void_p) {
-    // 忽略SIGPIPE信号
-    sigset_t signal_mask;
-    sigemptyset (&signal_mask);
-    sigaddset (&signal_mask, SIGPIPE);
-    int rc = pthread_sigmask (SIG_BLOCK, &signal_mask, NULL);
-    if (rc != 0) {
-        _printf("block sigpipe error/n");
-    }
-
+void do_read(int cfd, int epfd) {
     // 将浏览器发过来的数据, 读到buf中 
     //char line[1024] = {0};
-    int cfd = ((epoll_event_t *)void_p)->fd;
-    int epfd = ((epoll_event_t *)void_p)->epfd;
-    // 释放void，在reactor中申请
-    if (void_p)free(void_p);
-
     char *line = (char *)calloc(sizeof(char), _MAXLENGTH);
     // 读请求行
     //int len = get_line(cfd, line, sizeof(line));
     int len = get_line(cfd, line, _MAXLENGTH);
     if(len == 0) {
-        _printf("客户端断开了连接...\n");
+        printf("客户端断开了连接...\n");
+        // 关闭套接字, cfd从epoll上del
+        disconnect(cfd, epfd);         
     }
     else {
-        _printf("请求行数据: %s", line);
-        _printf("============= 请求头 ============\n");
+        printf("请求行数据: %s", line);
+        printf("============= 请求头 ============\n");
         // 还有数据没读完
         char *buf = (char *)calloc(sizeof(char), _MAXLENGTH);
         // 继续读
         while(len) {
             //char buf[1024] = {0};
             //len = get_line(cfd, buf, sizeof(buf));
-            len = get_line(cfd, buf, _MAXLENGTH);
-            _printf("-----: %s", buf);
+            len = get_line(cfd, buf, _LENGTH);
+            printf("-----: %s", buf);
         }
         free(buf);
-        _printf("============= The End ============\n");
+        printf("============= The End ============\n");
     }
 
     // 请求行: get /xxx http/1.1
@@ -163,31 +92,21 @@ void do_read(void *void_p) {
     if(strncasecmp("get", line, 3) == 0) {
         // 处理http请求
         http_request(line, cfd);
+        // 关闭套接字, cfd从epoll上del
+        disconnect(cfd, epfd);         
     }
-    // 关闭套接字, cfd从epoll上del
-    disconnect(cfd, epfd);         
     // 释放line空间
     free(line);
-    return ;
 }
 
 // 断开连接的函数
 void disconnect(int cfd, int epfd) {
-
-    // 加锁
-    pthread_mutex_lock(&mute);
-    
     int ret = epoll_ctl(epfd, EPOLL_CTL_DEL, cfd, NULL);
     if(ret == -1) {
-        _perror("epoll_ctl del cfd error");
-        //exit(1);
+        perror("epoll_ctl del cfd error");
+        exit(1);
     }
-    _printf("用户已经断开\n");
     close(cfd);
-
-    // 解锁
-    pthread_mutex_unlock(&mute);
-
 }
 
 // http请求处理
@@ -197,7 +116,7 @@ void http_request(const char* request, int cfd) {
     char method[12], path[1024], protocol[12];
     sscanf(request, "%[^ ] %[^ ] %[^ ]", method, path, protocol);
 
-    _printf("method = %s, path = %s, protocol = %s\n", method, path, protocol);
+    printf("method = %s, path = %s, protocol = %s\n", method, path, protocol);
 
     // 转码 将不能识别的中文乱码 - > 中文
     // 解码 %23 %34 %5f
@@ -216,7 +135,7 @@ void http_request(const char* request, int cfd) {
     int ret = stat(file, &st);
     if(ret == -1) {
         // show 404
-        _perror("No file");
+        perror("No file");
         send_respond_head(cfd, 404, "File Not Found", ".html", -1);
         send_file(cfd, "404.html");
     }
@@ -255,7 +174,7 @@ void send_dir(int cfd, const char* dirname) {
 
         // 拼接文件的完整路径
         sprintf(path, "%s/%s", dirname, name);
-        _printf("path = %s ===================\n", path);
+        printf("path = %s ===================\n", path);
         struct stat st;
         stat(path, &st);
 
@@ -280,12 +199,12 @@ void send_dir(int cfd, const char* dirname) {
     sprintf(buf+strlen(buf), "</table></body></html>");
     send(cfd, buf, strlen(buf), 0);
 
-    _printf("dir message send OK!!!!\n");
+    printf("dir message send OK!!!!\n");
 #if 0
     // 打开目录
     DIR* dir = opendir(dirname);
     if(dir == NULL) {
-        _perror("opendir error");
+        perror("opendir error");
         exit(1);
     }
 
@@ -314,32 +233,40 @@ void send_respond_head(int cfd, int no, const char* desp, const char* type, long
 }
 
 // 发送
-int socket_send(int fd, const char* usrbuf, size_t n) {
-    size_t nleft = n;
-    ssize_t nwritten;
-    char *bufp = (char *)usrbuf;
-
-    while(nleft > 0){
-        if((nwritten = write(fd, bufp, nleft)) <= 0){
-            if (errno == EINTR)
-                nwritten = 0;
-            else if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                nwritten = 0;
-                //usleep(100);
-            }
-            else{
-                return -1;
-            }
-        } else {
-            nleft -= nwritten;
-            bufp += nwritten;
-            _printf("总 = %lu 剩 = %lu\n", n, nleft);
-        }
-    }
-    return 0;
+ssize_t socket_send( int  sockfd,  const  char * buffer,  size_t  buflen)
+{
+   ssize_t tmp;
+   size_t  total = buflen;
+   const  char  *p = buffer; 
+ 
+   while (1)
+   {
+     tmp = send(sockfd, p, total, 0);
+     if (tmp < 0)
+     {
+       // 当send收到信号时,可以继续写,但这里返回-1.
+       if ( errno  == EINTR)
+         return  -1; 
+ 
+       // 当socket是非阻塞时,如返回此错误,表示写缓冲队列已满,
+       // 在这里做延时后再重试.
+       if ( errno  == EAGAIN)
+       {
+         usleep(1000);
+         continue ;
+       } 
+ 
+       return  -1;
+     } 
+ 
+     if (( size_t )tmp == total)
+       return  buflen; 
+ 
+     total -= tmp;
+     p += tmp;
+   } 
+   return  tmp;
 }
-
-
 
 // 发送文件
 void send_file(int cfd, const char* filename) {
@@ -347,32 +274,33 @@ void send_file(int cfd, const char* filename) {
     int fd = open(filename, O_RDONLY);
     if(fd == -1) {
         // show 404
-        close(fd);
         return;
     }
 
     // 循环读文件
-    //char buf[_MAXLENGTH * 10] = {0};
-    struct stat st;
-    stat(filename, &st);
+    //char buf[_MAXLENGTH] = {0};
+    char *buf = (char *)calloc(sizeof(char), _MAXLENGTH);
+    int len = 0;
+    while( (len = read(fd, buf, _MAXLENGTH)) > 0 ) {
+        // 发送读出的数据
+        //int ret = socket_send(cfd, buf, len);
 
-    size_t len = st.st_size;
-
-    char *fileadd = mmap(NULL, st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
-    int ret = socket_send(cfd, fileadd, st.st_size);
-    if (ret < 0) {
-        _perror("send file error");
+        int ret = send(cfd, buf, len, 0);
+        if (ret == -1) {
+            perror("send error");
+            free(buf);
+            //disconnect(cfd);
+            return ;
+            //exit(-1);
+        }
     }
-    munmap(fileadd, st.st_size);
-    _printf("this ----------------------------\n");
     if(len == -1) {
-        _perror("read file error");
-        close(fd);
+        perror("read file error");
         exit(1);
     }
 
-    close(fd);
     // 释放buf空间
+    free(buf);
 }
 
 // 解析http请求消息的每一行内容
@@ -404,38 +332,36 @@ int get_line(int sock, char *buf, int size) {
     return i;
 }
 
-// 接受新连接处理并放入epoll树
+// 接受新连接处理
 void do_accept(int lfd, int epfd) {
     struct sockaddr_in client;
     socklen_t len = sizeof(client);
     int cfd = accept(lfd, (struct sockaddr*)&client, &len);
     if(cfd == -1) {
-        _perror("accept error");
+        perror("accept error");
         exit(1);
     }
 
     // 打印客户端信息
     char ip[64] = {0};
-    _printf("New Client IP: %s, Port: %d, cfd = %d\n",
+    printf("New Client IP: %s, Port: %d, cfd = %d\n",
            inet_ntop(AF_INET, &client.sin_addr.s_addr, ip, sizeof(ip)),
            ntohs(client.sin_port), cfd);
 
     // 设置cfd为非阻塞
     int flag = fcntl(cfd, F_GETFL);
-
     flag |= O_NONBLOCK;
     fcntl(cfd, F_SETFL, flag);
 
     // 得到的新节点挂到epoll树上
     struct epoll_event ev;
     ev.data.fd = cfd;
-
     // 边沿非阻塞模式
 
     ev.events = EPOLLIN | EPOLLET;
     int ret = epoll_ctl(epfd, EPOLL_CTL_ADD, cfd, &ev);
     if(ret == -1) {
-        _perror("epoll_ctl add cfd error");
+        perror("epoll_ctl add cfd error");
         exit(1);
     }
 }
@@ -444,7 +370,7 @@ int init_listen_fd(int port, int epfd) {
     //　创建监听的套接字
     int lfd = socket(AF_INET, SOCK_STREAM, 0);
     if(lfd == -1) {
-        _perror("socket error");
+        perror("socket error");
         exit(1);
     }
 
@@ -458,22 +384,16 @@ int init_listen_fd(int port, int epfd) {
     // 端口复用
     int flag = 1;
     setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &flag, sizeof(flag));
-
-    int ep_flag = fcntl(epfd, F_GETFL);
-
-    ep_flag |= O_NONBLOCK;
-    fcntl(epfd, F_SETFL, ep_flag);
-
     int ret = bind(lfd, (struct sockaddr*)&serv, sizeof(serv));
     if(ret == -1) {
-        _perror("bind error");
+        perror("bind error");
         exit(1);
     }
 
     // 设置监听
-    ret = listen(lfd, MAXSIZE);
+    ret = listen(lfd, 64);
     if(ret == -1) {
-        _perror("listen error");
+        perror("listen error");
         exit(1);
     }
 
@@ -483,7 +403,7 @@ int init_listen_fd(int port, int epfd) {
     ev.data.fd = lfd;
     ret = epoll_ctl(epfd, EPOLL_CTL_ADD, lfd, &ev);
     if(ret == -1) {
-        _perror("epoll_ctl add lfd error");
+        perror("epoll_ctl add lfd error");
         exit(1);
     }
 
@@ -572,6 +492,8 @@ const char *get_file_type(const char *name) {
         return "audio/wav";
     if (strcmp(dot, ".avi") == 0)
         return "video/x-msvideo";
+    if (strcmp(dot, ".mkv") == 0)
+        return "video/mkv";
     if (strcmp(dot, ".mov") == 0 || strcmp(dot, ".qt") == 0)
         return "video/quicktime";
     if (strcmp(dot, ".mpeg") == 0 || strcmp(dot, ".mpe") == 0)

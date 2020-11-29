@@ -25,7 +25,7 @@ CxxArgs = -c -O3 -I./include
 endif
 
 #$^ 全部依赖文件
-webserver : $(ObjectFiles)
+server : $(ObjectFiles)
 	${CC} -o $@ $^ -lpthread 
 	@echo -e "\033[32m make relese version OK\033[0m"
 
